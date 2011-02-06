@@ -55,6 +55,7 @@ import org.neo4j.graphdb.index.BatchInserterIndex;
 import org.neo4j.graphdb.index.BatchInserterIndexProvider;
 import org.neo4j.graphdb.index.Index;
 import org.neo4j.graphdb.index.IndexHits;
+import org.neo4j.index.bdbje.BerkeleyDbBatchInserterIndexProvider;
 import org.neo4j.index.impl.lucene.LuceneBatchInserterIndexProvider;
 import org.neo4j.kernel.EmbeddedGraphDatabase;
 import org.neo4j.kernel.impl.batchinsert.BatchInserter;
@@ -66,6 +67,7 @@ import com.vividsolutions.jts.geom.Envelope;
 public class OSMImporter implements Constants {
     public static DefaultEllipsoid WGS84 = DefaultEllipsoid.WGS84;
 
+    //TODO: is this really needed? Should we have several indexes?
     protected static final List<String> NODE_INDEXING_KEYS = new ArrayList<String>();
     static {
         NODE_INDEXING_KEYS.add("node_osm_id");
@@ -533,6 +535,8 @@ public class OSMImporter implements Constants {
         private BatchInserterIndex batchIndex;
 	    private long osm_root;
 	    private long osm_dataset;
+        private BerkeleyDbBatchInserterIndexProvider bdbBatchIndexService;
+        private BatchInserterIndex bdbBatchIndex;
 
 		private OSMBatchWriter(BatchInserter batchGraphDb, StatsManager statsManager) {
 			super(statsManager);
@@ -541,6 +545,8 @@ public class OSMImporter implements Constants {
             config.put( "type", "exact" );
             this.batchIndexService = new LuceneBatchInserterIndexProvider(batchGraphDb);
             this.batchIndex = batchIndexService.nodeIndex( INDEX_NODES, config  );
+            this.bdbBatchIndexService = new BerkeleyDbBatchInserterIndexProvider(batchGraphDb);
+            this.bdbBatchIndex = bdbBatchIndexService.nodeIndex( INDEX_NODES, config  );
     	}
 		
 		@Override
@@ -579,7 +585,7 @@ public class OSMImporter implements Constants {
 	    }
 
 		public String toString() {
-			return "BatchInserter["+batchInserter.toString()+"]:IndexService["+batchIndexService.toString()+"]";
+			return "BatchInserter["+batchInserter.toString()+"]:IndexService["+batchIndexService.toString()+", "+bdbBatchIndexService.toString()+"]";
 		}
 
 		@Override
@@ -625,6 +631,7 @@ public class OSMImporter implements Constants {
 				Map<String, Object> props = new HashMap<String, Object>();
 				props.put( indexKey, properties.get(indexKey));
                 batchIndex.add(id, props );
+                bdbBatchIndex.add( id, props );
 			}
 			return id;
 		}
@@ -638,14 +645,14 @@ public class OSMImporter implements Constants {
 			long id = -1;
 			Object indexValue = (indexKey==null) ? null : properties.get(indexKey);
 			if (indexValue != null && (createdNodes+foundNodes < 100 || foundNodes > 10)) {
-				id = batchIndex.get(indexKey, properties.get(indexKey)).getSingle();
+				id = bdbBatchIndex.get(indexKey, properties.get(indexKey)).getSingle();
 			}
 			if (id < 0) {
 				id = batchInserter.createNode(properties);
 				if (indexValue != null) {
 					Map<String, Object> props = new HashMap<String, Object>();
 					props.put( indexKey, properties.get(indexKey) );
-                    batchIndex.add(id, props );
+					bdbBatchIndex.add(id, props );
 				}
 				createdNodes++;
 			}else{
@@ -671,7 +678,7 @@ public class OSMImporter implements Constants {
 
 		@Override
 		protected Long getSingleNode(String string, Object value) {
-			return batchIndex.get(string, value).getSingle();
+			return bdbBatchIndex.get(string, value).getSingle();
 		}
 
 		@Override
@@ -681,7 +688,7 @@ public class OSMImporter implements Constants {
 
 		@Override
 		protected IndexHits<Long> getNodes(String string, long nd_ref) {
-			return batchIndex.get(string, nd_ref);
+			return bdbBatchIndex.get(string, nd_ref);
 		}
 
 		@Override
@@ -699,6 +706,8 @@ public class OSMImporter implements Constants {
 		protected void shutdownIndex() {
 			batchIndexService.shutdown();
 			batchIndexService = null;
+			bdbBatchIndexService.shutdown();
+			bdbBatchIndex = null;
 		}
 
 		@Override
@@ -1194,8 +1203,8 @@ public class OSMImporter implements Constants {
 
 		protected void shutdown() {
 			if (graphDb != null) {
+			    batchInserter.shutdown();
 				graphDb.shutdown();
-				//batch
 				graphDb = null;
 				batchInserter = null;
 			}
