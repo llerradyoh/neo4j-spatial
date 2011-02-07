@@ -21,9 +21,14 @@ package org.neo4j.gis.spatial.osm;
 
 import static java.util.Arrays.asList;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.io.PrintStream;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -55,6 +60,7 @@ import org.neo4j.graphdb.index.BatchInserterIndex;
 import org.neo4j.graphdb.index.BatchInserterIndexProvider;
 import org.neo4j.graphdb.index.Index;
 import org.neo4j.graphdb.index.IndexHits;
+import org.neo4j.index.bdbje.BerkeleyDbBatchInserterIndex;
 import org.neo4j.index.bdbje.BerkeleyDbBatchInserterIndexProvider;
 import org.neo4j.index.impl.lucene.LuceneBatchInserterIndexProvider;
 import org.neo4j.kernel.EmbeddedGraphDatabase;
@@ -62,6 +68,10 @@ import org.neo4j.kernel.impl.batchinsert.BatchInserter;
 import org.neo4j.kernel.impl.batchinsert.BatchInserterImpl;
 import org.neo4j.kernel.impl.batchinsert.SimpleRelationship;
 
+import com.sleepycat.je.Database;
+import com.sleepycat.je.DatabaseEntry;
+import com.sleepycat.je.LockMode;
+import com.sleepycat.je.OperationStatus;
 import com.vividsolutions.jts.geom.Envelope;
 
 public class OSMImporter implements Constants {
@@ -531,22 +541,25 @@ public class OSMImporter implements Constants {
 
     private static class OSMBatchWriter extends OSMWriter<Long> {
     	private BatchInserter batchInserter;
-		private BatchInserterIndexProvider batchIndexService;
-        private BatchInserterIndex batchIndex;
+		//private BatchInserterIndexProvider batchIndexService;
+        //private BatchInserterIndex batchIndex;
 	    private long osm_root;
 	    private long osm_dataset;
         private BerkeleyDbBatchInserterIndexProvider bdbBatchIndexService;
-        private BatchInserterIndex bdbBatchIndex;
+        private BerkeleyDbBatchInserterIndex bdbBatchIndex;
+        private Database nodeCache;
 
 		private OSMBatchWriter(BatchInserter batchGraphDb, StatsManager statsManager) {
 			super(statsManager);
     		this.batchInserter = batchGraphDb;
             Map<String, String> config = new HashMap<String, String>();
             config.put( "type", "exact" );
-            this.batchIndexService = new LuceneBatchInserterIndexProvider(batchGraphDb);
-            this.batchIndex = batchIndexService.nodeIndex( INDEX_NODES, config  );
+            //this.batchIndexService = new LuceneBatchInserterIndexProvider(batchGraphDb);
+            //this.batchIndex = batchIndexService.nodeIndex( INDEX_NODES, config  );
             this.bdbBatchIndexService = new BerkeleyDbBatchInserterIndexProvider(batchGraphDb);
-            this.bdbBatchIndex = bdbBatchIndexService.nodeIndex( INDEX_NODES, config  );
+            this.bdbBatchIndex = (BerkeleyDbBatchInserterIndex) bdbBatchIndexService.nodeIndex( INDEX_NODES, config  );
+            
+            nodeCache = bdbBatchIndex.createDB( "nodeCache" );
     	}
 		
 		@Override
@@ -579,13 +592,51 @@ public class OSMImporter implements Constants {
 	            properties.put("name", name);
 	            properties.put("type", type);
 	            node = batchInserter.createNode(properties);
+	            
+	            nodeCache.put( null, new DatabaseEntry(serializeToBytes(node)), new DatabaseEntry(serializeToBytes(properties)) );
 	            batchInserter.createRelationship(parent, node, relType, null);
 	        }
 	        return node;
 	    }
+        private byte[] serializeToBytes( Object data )
+        {
+            ByteArrayOutputStream baus = new ByteArrayOutputStream();
+            try
+            {
+                ObjectOutputStream dos = new ObjectOutputStream( baus );
+                dos.writeObject(  data );
+                dos.flush();
+                dos.close();
+            }
+            catch ( IOException e )
+            {
+                // TODO Auto-generated catch block
+                e.printStackTrace();
+            }
+            return baus.toByteArray();
+        }
+        
+        private Object getObjectFromBytes( byte[] data )
+        {
+            ByteArrayInputStream baus = new ByteArrayInputStream(data);
+            Object result = null;
+            try
+            {
+                ObjectInputStream dos = new ObjectInputStream( baus );
+                result = dos.readObject( );
+                dos.close();
+            }
+            catch ( Exception e )
+            {
+                // TODO Auto-generated catch block
+                e.printStackTrace();
+            }
+            return result;
+        }
 
-		public String toString() {
-			return "BatchInserter["+batchInserter.toString()+"]:IndexService["+batchIndexService.toString()+", "+bdbBatchIndexService.toString()+"]";
+        public String toString() {
+//			return "BatchInserter["+batchInserter.toString()+"]:IndexService["+batchIndexService.toString()+", "+bdbBatchIndexService.toString()+"]";
+            return "BatchInserter["+batchInserter.toString()+"]:IndexService["+bdbBatchIndexService.toString()+"]";
 		}
 
 		@Override
@@ -602,6 +653,8 @@ public class OSMImporter implements Constants {
 			if (currentNode > 0 && tags.size() > 0) {
 				statsManager.addToTagStats(type, tags.keySet());
 				long id = batchInserter.createNode(tags);
+                nodeCache.put( null, new DatabaseEntry(serializeToBytes(id)), new DatabaseEntry(serializeToBytes(tags)) );
+
 				batchInserter.createRelationship(currentNode, id, OSMRelation.TAGS, new HashMap());
 				tags.clear();
 			}
@@ -617,6 +670,8 @@ public class OSMImporter implements Constants {
 	            properties.put("vertices", vertices);
 	            properties.put("bbox", new double[] {bbox.getMinX(), bbox.getMaxX(), bbox.getMinY(), bbox.getMaxY()});
 	            long id = batchInserter.createNode(properties);
+                nodeCache.put( null, new DatabaseEntry(serializeToBytes(id)), new DatabaseEntry(serializeToBytes(properties)) );
+
 	            batchInserter.createRelationship(currentNode, id, OSMRelation.GEOM, null);
 	            properties.clear();
 	            statsManager.addGeomStats(gtype);
@@ -626,12 +681,14 @@ public class OSMImporter implements Constants {
 		@Override
 		protected Long addNode(String name, Map<String, Object> properties, String indexKey) {
 			long id = batchInserter.createNode(properties);
+			nodeCache.put( null, new DatabaseEntry(serializeToBytes(id)), new DatabaseEntry(serializeToBytes(properties)) );
+
 			if (indexKey != null && properties.containsKey(indexKey)) {
 			    
 				Map<String, Object> props = new HashMap<String, Object>();
 				props.put( indexKey, properties.get(indexKey));
-                batchIndex.add(id, props );
-                bdbBatchIndex.add( id, props );
+                //batchIndex.add(id, props );
+				bdbBatchIndex.add( id, props );
 			}
 			return id;
 		}
@@ -649,6 +706,8 @@ public class OSMImporter implements Constants {
 			}
 			if (id < 0) {
 				id = batchInserter.createNode(properties);
+	            nodeCache.put( null, new DatabaseEntry(serializeToBytes(id)), new DatabaseEntry(serializeToBytes(properties)) );
+
 				if (indexValue != null) {
 					Map<String, Object> props = new HashMap<String, Object>();
 					props.put( indexKey, properties.get(indexKey) );
@@ -681,9 +740,13 @@ public class OSMImporter implements Constants {
 			return bdbBatchIndex.get(string, value).getSingle();
 		}
 
+		//TODO: this is slow. We should think of replacing this with some exact lookup
 		@Override
 		protected Map<String, Object> getNodeProperties(Long member) {
-			return batchInserter.getNodeProperties(member);
+            DatabaseEntry result = new DatabaseEntry();
+            OperationStatus status = nodeCache.get(null, new DatabaseEntry(serializeToBytes( member )), result, LockMode.READ_UNCOMMITTED );
+            return (Map<String, Object>) getObjectFromBytes(result.getData());
+//			return batchInserter.getNodeProperties(member);
 		}
 
 		@Override
@@ -704,15 +767,18 @@ public class OSMImporter implements Constants {
 
 		@Override
 		protected void shutdownIndex() {
-			batchIndexService.shutdown();
-			batchIndexService = null;
+			//batchIndexService.shutdown();
+			//batchIndexService = null;
 			bdbBatchIndexService.shutdown();
 			bdbBatchIndex = null;
 		}
 
 		@Override
 		protected Long createProxyNode() {
-			return batchInserter.createNode(null);
+			long id = batchInserter.createNode(null);
+            nodeCache.put( null, new DatabaseEntry(serializeToBytes(id)), new DatabaseEntry(serializeToBytes(null)) );
+
+            return id;
 		}
 
     }

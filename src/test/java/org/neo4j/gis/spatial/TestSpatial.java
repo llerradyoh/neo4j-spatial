@@ -148,6 +148,8 @@ public class TestSpatial extends Neo4jTestCase {
         // Envelope bbox = new Envelope(7, 10, 37, 40);
 
         addTestLayer("sweden.osm", DataFormat.OSM, bbox);
+        addTestLayer("croatia.osm", DataFormat.OSM, bbox);
+        addTestLayer("malta.osm", DataFormat.OSM, bbox);
         addTestLayer("sweden.osm.administrative", DataFormat.OSM, bbox);
 
         addTestLayer("sweden_administrative", DataFormat.SHP, bbox);
@@ -195,6 +197,7 @@ public class TestSpatial extends Neo4jTestCase {
 
     public static Test suite() {
         spatialTestMode = System.getProperty("spatial.test.mode");
+        System.out.println("spatialTestMode: " + spatialTestMode);
         deleteDatabase();
         TestSuite suite = new TestSuite();
         // suite.addTest(new TestSpatial("testSpatialIndex"));
@@ -216,7 +219,9 @@ public class TestSpatial extends Neo4jTestCase {
             //layersToTest = new String[] {"sweden_administrative"};
         } else {
             // Tests to run by default for regression (not too long running, and should always pass)
-            layersToTest = new String[] {"billesholm.osm", "sweden.osm.administrative", "sweden_administrative", "sweden_natural", "sweden_water"};
+            layersToTest = new String[] {"croatia.osm"};
+//            layersToTest = new String[] {"malta.osm"};
+//            layersToTest = new String[] {"billesholm.osm", "sweden.osm.administrative", "sweden_administrative", "sweden_natural", "sweden_water"};
         }
         for (final String layerName : layersToTest) {
             suite.addTest(new TestSpatial("Test Import of "+layerName) {
@@ -232,7 +237,7 @@ public class TestSpatial extends Neo4jTestCase {
             suite.addTest(new TestSpatial("Test Spatial Index on "+layerName) {
                 public void runTest() {
                     try {
-                        testSpatialIndex(layerName);
+                        //testSpatialIndex(layerName);
                     } catch (Exception e) {
                         // assertTrue("Failed to run import test due to exception: " + e, false);
                         throw new SpatialDatabaseException(e.getMessage(), e);
@@ -287,6 +292,7 @@ public class TestSpatial extends Neo4jTestCase {
         String osmPath = OSM_DIR + File.separator + layerName;
         System.out.println("\n=== Loading layer " + layerName + " from " + osmPath + " ===");
         reActivateDatabase(false, true, false);
+        
         OSMImporter importer = new OSMImporter(layerName);
         importer.importFile(getBatchInserter(), osmPath);
         reActivateDatabase(false, false, false);
